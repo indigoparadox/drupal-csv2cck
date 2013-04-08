@@ -1,0 +1,21 @@
+
+.csvcolumn-options .form-item {
+   white-space: normal !important;
+}
+
+.csv2cck-row-invalid {
+   background: #fec5c1 !important; /* Pink-ish */
+}
+
+.csv2cck-row-invalid * {
+   color: #bc2e0b !important; /* Burgandy-ish */
+}
+
+.csv2cck-row-invalid a {
+   text-decoration: underline;
+}
+
+.csv2cck-process-complete {
+   text-decoration: line-through;
+}
+

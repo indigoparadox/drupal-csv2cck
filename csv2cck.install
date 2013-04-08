@@ -1,0 +1,67 @@
+<?php
+// This line is so VIM recognizes this as a PHP file:
+// vim:ft=php:shiftwidth=3:tabstop=3:
+
+// core: hook_schema()
+function csv2cck_schema() {
+   $schema = array();
+
+   $schema['csv2cck_upload_queue'] = array(
+      'description' => 'A queue to store uploaded content before creation.',
+      'fields' => array(
+         'id' => array(
+            'description' => 'A unique ID for this row.',
+            'type' => 'serial',
+            'unsigned' => true,
+            'not null' => true,
+         ),
+         'uploadtime' => array(
+            'description' => 'The UNIX timestamp when this CSV was uploaded.',
+            'type' => 'int',
+            'unsigned' => true,
+            'not null' => true,
+            'default' => 0,
+         ),
+         'uploaduid' => array(
+            'description' => 'The UID of the uploader for this CSV.',
+            'type' => 'int',
+            'unsigned' => true,
+            'not null' => true,
+            'default' => 0,
+         ),
+         'uploadcomplete' => array(
+            'description' => 'TRUE if nodes were created, false if not yet.',
+            'type' => 'int',
+            'size' => 'tiny',
+            'not null' => true,
+            'default' => 0,
+         ),
+         'csvfilename' => array(
+            'description' => 'The filename of the CSV this row is from.',
+            'type' => 'varchar',
+            'length' => 255,
+            'not null' => true,
+            'default' => '',
+         ),
+         'csvfielddata' => array(
+            'description' => 'A serialized array containing the CSV data.',
+            'type' => 'text',
+            'size' => 'big',
+            'not null' => true,
+         ),
+         'csvconvertmap' => array(
+            'description' => 'A serialized array containing the CSV '.
+               'intermediary conversion map.',
+            'type' => 'text',
+            'size' => 'big',
+            'not null' => true,
+            'default' => '',
+         ),
+      ),
+      'primary key' => array( 'id' ),
+      'indexes' => array( 'id' => array( 'id' ) ),
+   );
+
+   return $schema;
+}
+

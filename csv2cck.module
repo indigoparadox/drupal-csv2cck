@@ -1,0 +1,957 @@
+<?php
+// This line is so VIM recognizes this as a PHP file:
+// vim:ft=php:shiftwidth=3:tabstop=3:
+
+// core: hook_menu()
+function csv2cck_menu() {
+   $items['admin/structure/csv2cck'] = array(
+      'title' => 'csv2cck',
+      'description' => 'Upload a CSV file to make nodes.',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array( 'csv2cck_upload_form' ),
+      'access arguments' => array( 'allow csv mass nodes' ),
+      'type' => MENU_NORMAL_ITEM,
+   );
+
+   $items['admin/structure/csv2cck/upload'] = array(
+      'title' => 'Upload',
+      'description' => 'Upload a CSV file to make nodes.',
+      'access arguments' => array( 'allow csv mass nodes' ),
+      'type' => MENU_DEFAULT_LOCAL_TASK,
+   );
+
+   $items['admin/structure/csv2cck/process'] = array(
+      'title' => 'Process',
+      'description' => 'Finalize an uploaded CSV file into nodes.',
+      'page callback' => 'csv2cck_process_router',
+      'access arguments' => array( 'allow csv mass nodes' ),
+      'type' => MENU_LOCAL_TASK,
+   );
+
+   return $items;
+}
+
+// core: hook_permission()
+function csv2cck_permission() {
+   return array(
+      'allow csv mass nodes' => array(
+         'title' => t( 'allow csv mass nodes' ),
+         'description' => t( 'Create nodes from CSV files.' )
+      )
+   );
+}
+
+// form: upload_form()
+function csv2cck_upload_form( $form_state ) {
+   $form = array();
+
+   drupal_set_title( t( 'csv2cck - Upload' ) );
+
+   // Build the form to display.
+   $form['csvupload'] = array(
+      '#type' => 'file',
+      '#title' => 'CSV file',
+      '#description' => 'The file will be parsed and you will be asked to '.
+         'match columns from it to columns in your content schema.'
+   );
+
+   $form['submit'] = array(
+      '#type' => 'submit', 
+      '#value' => t( 'Upload' ),
+   );
+
+   return $form; 
+}
+
+function csv2cck_upload_form_validate( $form, &$form_state ) {
+   $csv_file = file_save_upload(
+      'csvupload',
+      array( 'file_validate_extensions' => array( 'csv' ) )
+   );
+
+   if( $csv_file ) {
+      //if( $file = file_move( $csv_file, '/tmp/'
+      $form_state['storage']['csvupload'] = $csv_file;
+   } else {
+      // TODO: Error message.
+   }
+}
+
+function csv2cck_upload_form_submit( $form, &$form_state ) {
+   $csv_array = array();
+   global $user;
+
+   // Open the CSV file and parse it into arrays.
+   $csv_path = drupal_realpath( $form_state['storage']['csvupload']->uri );
+   if( file_exists( $csv_path ) ) {
+      $csv_handle = fopen( $csv_path, 'r' );
+      while( !feof( $csv_handle ) ) {
+         $csv_line = fgets( $csv_handle );
+         // TODO: Ignore escaped commas, somehow?
+         // TODO: Strip quotation marks if present.
+         $csv_array[] = explode( ',', trim( $csv_line ) );
+      }
+      fclose( $csv_handle );
+   }
+
+   // Store the array of CSV data as a row in the queue.
+   $db_record = array(
+      'uploadtime' => REQUEST_TIME,
+      'uploaduid' => $user->uid,
+      'csvfilename' => $form_state['storage']['csvupload']->filename,
+      'csvfielddata' => serialize( $csv_array ),
+      'csvconvertmap' => '',
+   );
+   drupal_write_record( 'csv2cck_upload_queue', $db_record );
+      
+   // Get rid of the file we're finished processing.
+   file_delete( $form_state['storage']['csvupload'], true );
+   unset( $form_state['storage']['csvupload'] );
+
+   // Go to the processing page.
+   $upload_message = t(
+      'The CSV %csv has been uploaded to the import queue.',
+      array( '%csv' => $db_record['csvfilename'] )
+   );
+   drupal_set_message( $upload_message );
+   watchdog( 'csv2cck', $upload_message );
+   drupal_goto( 'admin/structure/csv2cck/process' );
+}
+
+// form: process_form()
+function csv2cck_process_form( $form_state ) {
+   $form = array();
+
+   // XXX
+   //drupal_set_title( t( 'csv2cck - Select' ) );
+   drupal_add_css( drupal_get_path( 'module', 'csv2cck' ).'/csv2cck.css' );
+
+   $csv_result = db_select( 'csv2cck_upload_queue', 'q' )
+      ->fields( 'q' )
+      ->execute();
+
+   $form['csvfiles'] = array(
+      '#prefix' => '<div id="csvfiles">',
+      '#suffix' => '</div>',
+      '#tree' => true,
+      '#theme' => 'table',
+      '#header' => array(
+         t( 'Convert' ),
+         t( 'Delete' ),
+         t( 'Filename' ),
+         t( 'Upload time' ),
+      ),
+      '#rows' => array(),
+   );
+
+   while( $queue_iter = $csv_result->fetchAssoc() ) {
+      $row_classes = array();
+
+      // Create the data rows for the table.
+      $process = array(
+         '#id' => 'csvfiles-'.$queue_iter['id'].'-process',
+         '#type' => 'radio',
+         '#attributes' => array(
+            'onclick' => 'csv2cck_radio_exclusive( \'csvfiles-'.
+               $queue_iter['id'].'-process\' );'
+         ),
+      );
+      $delete = array(
+         '#id' => 'csvfiles-'.$queue_iter['id'].'-delete',
+         '#type' => 'radio',
+         '#attributes' => array(
+            'onclick' => 'csv2cck_radio_exclusive( \'csvfiles-'.
+               $queue_iter['id'].'-delete\' );'
+         ),
+      );
+      $csvfilename = array(
+         //'#id' => 'csvfiles-'.$queue_iter['id'].'-csvfilename',
+         '#type' => 'item',
+         '#markup' => $queue_iter['csvfilename'],
+      );
+      $uploadtime = array(
+         //'#id' => 'csvfiles-'.$queue_iter['id'].'-uploadtime',
+         '#type' => 'item',
+         '#markup' => format_date( $queue_iter['uploadtime'] ),
+      );
+      $id = array(
+         '#id' => 'csvfiles-'.$queue_iter['id'].'-id',
+         '#type' => 'hidden',
+         '#value' => $queue_iter['id']
+      );
+
+      // Mark completed uploads.
+      if( $queue_iter['uploadcomplete'] ) {
+         $row_classes[] = 'csv2cck-process-complete';
+      }
+
+      // Add the constructed field entries to the selection form.
+      $form['csvfiles'][] = array(
+         'process' => &$process,
+         'delete' => &$delete,
+         'csvfilename' => &$csvfilename,
+         'uploadtime' => &$uploadtime,
+         'id' => &$id,
+      );
+      $form['csvfiles']['#rows'][] = array(
+         'data' => array(
+            array( 'data' => &$process ),
+            array( 'data' => &$delete ),
+            array( 'data' => &$csvfilename ),
+            array( 'data' => &$uploadtime ),
+            array( 'data' => &$id ),
+         ),
+         'class' => $row_classes,
+      );
+
+      // Notice the references above? Better wipe them out here or we'll stomp
+      // on our previous work!
+      unset( $process );
+      unset( $delete );
+      unset( $csvfilename );
+      unset( $uploadtime );
+      unset( $id );
+   }
+
+   $form['submit'] = array(
+      '#type' => 'submit', 
+      '#value' => t( 'Continue' ),
+   );
+
+   drupal_add_js( drupal_get_path( 'module', 'csv2cck' ).'/csv2cck-process.js' );
+
+   return $form;
+}
+
+// form: process_form_validate()
+function csv2cck_process_form_validate( $form, &$form_state ) {
+   $radio_count = 0;
+   foreach( $form_state['input']['csvfiles'] as $input_iter ) {
+      // Not using || here for obvious reasons.
+      if( 'on' == $input_iter['process'] ) {
+         $radio_count++;
+      }
+      if( 'on' == $input_iter['delete'] ) {
+         $radio_count++;
+      }
+   }
+   
+   if( 1 < $radio_count ) {
+      form_set_error(
+         '',
+         t( 'More than one operation cannot be selected.' )
+      );
+   }
+}
+
+// form: process_form_submit()
+function csv2cck_process_form_submit( $form, &$form_state ) {
+   foreach( $form_state['input']['csvfiles'] as $input_iter ) {
+      // Not using || here for obvious reasons.
+      if( 'on' == $input_iter['process'] ) {
+         //csv2cck_process_process( $input_iter['id'] );
+         drupal_goto(
+            'admin/structure/csv2cck/process/convert/'.$input_iter['id']
+         );
+      }
+      if( 'on' == $input_iter['delete'] ) {
+         drupal_goto(
+            'admin/structure/csv2cck/process/delete/'.$input_iter['id']
+         );
+      }
+   }
+}
+
+// form: convert_form()
+function csv2cck_convert_form( $form, &$form_state ) {
+   $form = array();
+
+   if( array_key_exists( 'selectid', $form_state['input'] ) ) {
+      $csv_id = $form_state['input']['selectid'];
+   } else {
+      $csv_id = arg( 5 );
+   }
+
+   // Fetch the CSV data to work with.
+   $csv_row = db_select( 'csv2cck_upload_queue', 'q' )
+      ->fields( 'q' )
+      ->condition( 'id', $csv_id, '=' )
+      ->execute()
+      ->fetchAssoc();
+
+   // The result should definitely contain something since the router validated
+   // it, right?
+   $csv_data = unserialize( $csv_row['csvfielddata'] );
+   $csv_convert_map = unserialize( $csv_row['csvconvertmap'] );
+
+   drupal_set_title( t( 'csv2cck - Convert' ) );
+   drupal_add_css( drupal_get_path( 'module', 'csv2cck' ).'/csv2cck.css' );
+
+   // The AJAX callbacks need the ID arg preserved.
+   $form['selectid'] = array(
+      '#type' => 'hidden',
+      '#value' => $csv_id,
+   );
+
+   $node_types = node_type_get_names();
+   $node_types[''] = '';
+   $form['nodetype'] = array(
+      '#type' => 'select',
+      '#title' => 'Node type',
+      '#options' => $node_types,
+      '#description' => 'This will be the type of nodes to create from the '.
+         'given file.',
+      '#ajax' => array(
+         'callback' => 'csv2cck_convert_callback_nodetype',
+      ),
+   );
+
+   $form['csvrows'] = array(
+      '#prefix' => '<div id="csvrows">',
+      '#suffix' => '</div>',
+      '#tree' => true,
+      '#theme' => 'table',
+      '#header' => array(
+         t( 'CSV Column' ),
+         t( 'Node Field' ),
+         t( 'Field Options' ),
+      ),
+      '#rows' => array(),
+   );
+
+   // Present a list of CCK fields available for the selected node type for
+   // each column.
+   for( $i = 0 ; $i < count( $csv_data[0] ) ; $i++ ) {
+      $column_title = array(
+         '#id' => 'csvcolumn-'.$i.'-title',
+         '#type' => 'item',
+         '#markup' => check_plain( $csv_data[0][$i] ),
+      );
+      $column_field = array(
+         '#id' => 'csvcolumn-'.$i.'-field',
+         '#type' => 'select',
+         '#options' => array(),
+         '#default_value' => '',
+         '#ajax' => array(
+            'callback' => 'csv2cck_convert_callback_fieldoptions',
+         ),
+      );
+      $column_options = array(
+         '#id' => 'csvcolumn-'.$i.'-options',
+         '#type' => 'item',
+         '#markup' => '---',
+      );
+
+      // If we're rebuilding this form, see if the node type has been selected
+      // and populate the column field selector accordingly so that validation
+      // doesn't give us an "invalid selection" error.
+      if( isset( $form_state['values'] ) ) {
+         // Rebuild the column field selector.
+         $node_fields_raw = 
+            field_info_instances( 'node', $form_state['values']['nodetype'] );
+         $node_fields = array();
+         $node_fields[''] = '';
+         foreach( $node_fields_raw as $field_key => $node_field_iter ) {
+            $node_fields[$field_key] = $node_field_iter['label'];
+         }
+         $column_field['#options'] = $node_fields;
+
+         // Rebuild the field options.
+         $column_options = csv2cck_invoke_form( 
+            $form, $form_state, $i,
+            field_info_field(
+               $form_state['values'][$i]['field']
+            )
+         );
+      }
+
+      $form['csvrows'][] = array(
+         'title' => &$column_title,
+         'field' => &$column_field,
+         'options' => &$column_options,
+      );
+      $form['csvrows']['#rows'][] = array(
+         array(
+            'data' => &$column_title,
+            'style' => 'width: 30%',
+         ),
+         array(
+            'data' => &$column_field,
+            'style' => 'width: 30%',
+         ),
+         array( 
+            'data' => &$column_options,
+            'style' => 'width: 40%',
+         ),
+      );
+
+      unset( $column_title );
+      unset( $column_field );
+      unset( $column_options );
+   }
+
+   if( !empty( $csv_convert_map ) ) {
+      $form['skip'] = array(
+         '#type' => 'button',
+         '#value' => t( 'Skip' ),
+         '#executes_submit_callback' => true,
+         '#validate' => array(),
+         '#submit' => array( 'csv2cck_convert_form_skip' ),
+      );
+   }
+
+   $form['submit'] = array(
+      '#type' => 'submit', 
+      '#value' => t( 'Save' ),
+   );
+
+   return $form;
+}
+
+// validate: convert()
+function csv2cck_convert_form_validate( $form, &$form_state ) {
+   if( empty( $form_state['input']['nodetype'] ) ) {
+      form_set_error(
+         'nodetype',
+         t( 'The node type to convert to must be selected.' )
+      );
+   }
+
+   // XXX: Don't allow nodes to be created unless their required types have
+   //      been assigned.
+}
+
+// submit: convert()
+function csv2cck_convert_form_submit( $form, &$form_state ) {
+
+   // Just blindly overwrite any older conversion map.
+   $csv_conversion = $form_state['input']['csvrows'];
+   $csv_conversion['node_type'] = $form_state['input']['nodetype'];
+   db_update( 'csv2cck_upload_queue' )
+      ->fields( array( 'csvconvertmap' => serialize( $csv_conversion ) ) )
+      ->condition( 'id', $form_state['input']['selectid'], '=' )
+      ->execute();
+
+   drupal_goto(
+      'admin/structure/csv2cck/process/preview/'.
+         $form_state['input']['selectid']
+   );
+}
+
+// skip: convert()
+function csv2cck_convert_form_skip( $form, &$form_state ) {
+   drupal_goto(
+      'admin/structure/csv2cck/process/preview/'.
+         $form_state['input']['selectid']
+   );
+}
+
+// callback: convert_nodetype()
+function csv2cck_convert_callback_nodetype( $form, &$form_state ) {
+   // Build a list of node fields to use in the dropdowns.
+   $node_fields_raw = 
+      field_info_instances( 'node', $form_state['input']['nodetype'] );
+   $node_fields = array();
+   $node_fields[''] = '';
+   foreach( $node_fields_raw as $field_key => $node_field_iter ) {
+      $node_fields[$field_key] = $node_field_iter['label'];
+   }
+
+   // Build a list of commands to replace each field selector with a new list
+   // of fields for the selected node type.
+   $commands = array();
+   for( $i = 0 ; array_key_exists( $i, $form['csvrows'] ) ; $i++ ) {
+      $form['csvrows'][$i]['field']['#options'] = $node_fields;
+
+      $commands[] = ajax_command_replace(
+         '#csvcolumn-'.$i.'-field',
+         render( $form['csvrows'][$i]['field'] )
+      );
+   }
+
+   return array( '#type' => 'ajax', '#commands' => $commands );
+}
+
+// callback: convert_fieldoptions()
+function csv2cck_convert_callback_fieldoptions( $form, &$form_state ) {
+   // Fetch the index of the triggering ID.
+   $trigger =  explode( '-', $form_state['triggering_element']['#id'] );
+   $trigger = $trigger[1];
+
+   //$form_state['rebuild'] = true;
+
+   // Figure out the type of the selected field and call the appropriate hook.
+   if( $field_results = csv2cck_invoke_form( 
+      $form, $form_state, $trigger,
+      field_info_field(
+         $form_state['input']['csvrows'][$trigger]['field']
+      )
+   ) ) {
+      $form['csvrows'][$trigger]['options'] = $field_results;
+
+   } else {
+      // Provide an empty placeholder with an ID to replace on.
+      $form['csvrows'][$trigger]['options'] = array(
+         '#id' => 'csvcolumn-'.$trigger.'-options',
+         '#type' => 'item',
+         '#markup' => '---',
+      );
+   }
+
+   // Prepare the field options for the selected field.
+   $commands = array();
+   $commands[] = ajax_command_replace(
+      '#csvcolumn-'.$trigger.'-options',
+      render( $form['csvrows'][$trigger]['options'] )
+   );
+
+   return array( '#type' => 'ajax', '#commands' => $commands );
+}
+
+// form: preview()
+function csv2cck_preview_form( $form, &$form_state ) {
+   $form = array();
+
+   if( array_key_exists( 'selectid', $form_state['input'] ) ) {
+      $csv_id = $form_state['input']['selectid'];
+   } else {
+      $csv_id = arg( 5 );
+   }
+
+   // Fetch the CSV data to work with.
+   $csv_row = db_select( 'csv2cck_upload_queue', 'q' )
+      ->fields( 'q' )
+      ->condition( 'id', $csv_id, '=' )
+      ->execute()
+      ->fetchAssoc();
+
+   $csv_data = unserialize( $csv_row['csvfielddata'] );
+   $csv_convert_map = unserialize( $csv_row['csvconvertmap'] );
+
+   drupal_set_title( t( 'csv2cck - Preview' ) );
+   drupal_add_css( drupal_get_path( 'module', 'csv2cck' ).'/csv2cck.css' );
+
+   // Create the form body.
+   $csvnodes_header = array();
+   for( $i = 0 ; $i < count( $csv_data[0] ) ; $i++ ) {
+      // Skip columns that were not selected for conversion.
+      if( 
+         empty( $csv_convert_map[$i]['field'] )
+      ) {
+         continue;
+      }
+
+      $csvnodes_header[] = check_plain( $csv_data[0][$i] );
+   }
+   $csvnodes_header['doconvert'] = t( 'Create Node' );
+   $form['csvnodes'] = array(
+      '#prefix' => '<div id="csvnodes">',
+      '#suffix' => '</div>',
+      '#tree' => true,
+      '#theme' => 'table',
+      '#header' => $csvnodes_header,
+      '#rows' => array(),
+   );
+
+   // Iterate through the data and process it to show how the system will see
+   // it when it becomes nodes. Subtract 1 from the maximum to account for row
+   // 0 being the column headers.
+   $any_row_invalid = false;
+   for( $i = 1 ; $i < count( $csv_data ) - 1 ; $i++ ) {
+      $row_invalid = false;
+
+      for( $j = 0 ; $j < count( $csv_data[$i] ) ; $j++ ) {
+         // Skip columns that were not selected for conversion.
+         if( empty( $csv_convert_map[$j]['field'] ) ) {
+            continue;
+         }
+
+         // Make sure an options key exists, at least, so the call below
+         // doesn't fail.
+         if( !array_key_exists( 'options', $csv_convert_map[$j] ) ) {
+            $csv_convert_map[$j]['options'] = array();
+         }
+
+         // TODO: Invoke the submit hooks for each column's converter.
+         $convert_iter = csv2cck_invoke_convert(
+            $csv_data[$i][$j],
+            field_info_field( $csv_convert_map[$j]['field'] ),
+            $csv_convert_map[$j]['options']
+         );
+         $column_content = array(
+            '#id' => 'csvnode-'.$i.'-'.$j,
+            '#type' => 'item',
+            '#markup' => $convert_iter['safe_value'],
+         );
+
+         //if( empty( $convert_iter['raw_value'] ) ) {
+         if( false == $convert_iter['valid'] ) {
+            //debug( $csv_convert_map[$j]['field'] );
+            $row_invalid = true;
+            $any_row_invalid = true;
+         }
+
+         $form['csvnodes'][$i]['data'][$j] = &$column_content;
+         $form['csvnodes']['#rows'][$i]['data'][$j] = 
+            array( 'data' => &$column_content );
+
+         unset( $column_content );
+      }
+
+      // Mark this row invalid if one of the fields is missing.
+      if( $row_invalid ) {
+         //$form['csvnodes']['#rows'][$i]['style'] = 'background: red';
+         $form['csvnodes']['#rows'][$i]['class'][] = 'csv2cck-row-invalid';
+      }
+
+      // Add a commit checkbox so we know if we want to process this row.
+      $do_convert = array(
+         '#id' => 'csvnodes-'.$i.'-doconvert',
+         '#type' => 'checkbox',
+         '#default_value' => !$row_invalid,
+      );
+
+      $form['csvnodes'][$i]['data']['doconvert'] = &$do_convert;
+      $form['csvnodes']['#rows'][$i]['data']['doconvert'] = array(
+         'data' => &$do_convert,
+      );
+
+      unset( $do_convert );
+   }
+
+   if( $any_row_invalid ) {
+      drupal_set_message(
+         t( 
+            'Some rows were unable to be fully interpreted. This could be due '.
+            'to missing or corrupt data in the original CSV. You can delete '.
+            'this CSV from the import queue, fix the original source file, '.
+            'and reupload, or check the invalid marked rows below to force '.
+            'them to be imported with invalid or missing data. You can also '.
+            'leave them unchecked to omit them from the import.'
+         ),
+         'error'
+      );
+         
+   }
+
+   $form['submit'] = array(
+      '#type' => 'submit', 
+      '#value' => t( 'Commit' ),
+   );
+
+   return $form;
+}
+
+// validate: preview()
+function csv2cck_preview_form_validate( $form, &$form_state ) {
+   // XXX: Don't allow selected rows with required fields not filled.
+}
+
+// submit: preview()
+function csv2cck_preview_form_submit( $form, &$form_state ) {
+   if( array_key_exists( 'selectid', $form_state['input'] ) ) {
+      $csv_id = $form_state['input']['selectid'];
+   } else {
+      $csv_id = arg( 5 );
+   }
+
+   // Fetch the CSV data to work with.
+   $csv_row = db_select( 'csv2cck_upload_queue', 'q' )
+      ->fields( 'q' )
+      ->condition( 'id', $csv_id, '=' )
+      ->execute()
+      ->fetchAssoc();
+   $csv_data = unserialize( $csv_row['csvfielddata'] );
+   $csv_convert_map = unserialize( $csv_row['csvconvertmap'] );
+
+   // Create a node for each row selected.
+   $nodes_processed = 0;
+   $nodes_skipped = 0;
+   for( $i = 1 ; $i < count( $form_state['input']['csvnodes'] ) ; $i++ ) {
+      if( 
+         '1' === $form_state['input']['csvnodes'][$i]['data']['doconvert']
+      ) {
+         $node = csv2cck_convert_row_node( $csv_data[$i], $csv_convert_map );
+         // TODO: Do we need to set the alias manually if we're using pathauto?
+         // XXX: String offset cast occurred in _field_invoke_multiple()
+         @node_save( $node );
+         //debug( $node );
+         $nodes_processed++;
+      } else {
+         $nodes_skipped++;
+      }
+   }
+
+   // Save the update status.
+   db_update( 'csv2cck_upload_queue' )
+      ->fields( array( 'uploadcomplete' => true ) )
+      ->condition( 'id', $csv_id, '=' )
+      ->execute();
+
+   // Give a brief status report.
+   $process_message = t(
+      '%proced rows were processed into nodes from %csv. %skipped rows were '.
+         'skipped.',
+      array( 
+         '%proced' => $nodes_processed,
+         '%csv' => $csv_row['csvfilename'],
+         '%skipped' => $nodes_skipped,
+      )
+   );
+   drupal_set_message( $process_message );
+   watchdog( 'csv2cck', $process_message );
+
+   // Redirect to router.
+   drupal_goto( 'admin/structure/csv2cck/process' );
+}
+
+// form: delete()
+function csv2cck_delete_form( $form, &$form_state ) {
+   $form = array();
+
+   if( array_key_exists( 'selectid', $form_state['input'] ) ) {
+      $csv_id = $form_state['input']['selectid'];
+   } else {
+      $csv_id = arg( 5 );
+   }
+
+   // Fetch the CSV data to work with.
+   $csv_row = db_select( 'csv2cck_upload_queue', 'q' )
+      ->fields( 'q' )
+      ->condition( 'id', $csv_id, '=' )
+      ->execute()
+      ->fetchAssoc();
+
+   $form['selectid'] = array(
+      '#type' => 'hidden',
+      '#value' => $csv_id,
+   );
+
+   $form['warning'] = array(
+      '#type' => 'item',
+      '#markup' => t(
+         'Are you sure you want to delete the CSV %csv? This action cannot be '.
+         'undone.',
+         array( '%csv' => $csv_row['csvfilename'] )
+      ),
+   );
+
+   $form['cancel'] = array(
+      '#type' => 'button',
+      '#value' => t( 'Cancel' ),
+      '#executes_submit_callback' => true,
+      '#submit' => array( 'csv2cck_delete_form_cancel' ),
+   );
+
+   $form['submit'] = array(
+      '#type' => 'submit', 
+      '#value' => t( 'Delete' ),
+   );
+
+   return $form;
+}
+
+// cancel: delete()
+function csv2cck_delete_form_cancel( $form, &$form_state ) {
+   drupal_goto( 'admin/structure/csv2cck/process' );
+}
+
+// submit: delete()
+function csv2cck_delete_form_submit( $form, &$form_state ) {
+   $csv_row = db_select( 'csv2cck_upload_queue', 'q' )
+      ->fields( 'q' )
+      ->condition( 'id', $form_state['input']['selectid'], '=' )
+      ->execute()
+      ->fetchAssoc();
+
+   db_delete( 'csv2cck_upload_queue' )
+      ->condition( 'id', $form_state['input']['selectid'] )
+      ->execute();
+
+   $delete_message = t(
+      'The uploaded CSV %csv has been deleted from the import queue.',
+      array( '%csv' => $csv_row['csvfilename'] )
+   );
+   drupal_set_message( $delete_message );
+   watchdog( 'csv2cck', $delete_message );
+   drupal_goto( 'admin/structure/csv2cck/process' );
+}
+
+function csv2cck_process_router() {
+   $process_action = arg( 4 );
+   $process_id = arg( 5 );
+
+   if( empty( $process_id ) ) {
+      return drupal_get_form( 'csv2cck_process_form' );
+      //drupal_goto( 'admin/structure/csv2cck/process' );
+   }
+   
+   switch( $process_action ) {
+      case 'convert':
+         $test_query = db_select( 'csv2cck_upload_queue', 'q' )
+            ->fields( 'q' )
+            ->condition( 'id', arg( 5 ), '=' )
+            ->execute()
+            ->fetchAssoc();
+         if( empty( $test_query ) ) {
+            return drupal_get_form( 'csv2cck_process_form' );
+         } else {
+            return drupal_get_form( 'csv2cck_convert_form' );
+         }
+         break;
+
+      case 'preview':
+         return drupal_get_form( 'csv2cck_preview_form' );
+
+      case 'delete':
+         return drupal_get_form( 'csv2cck_delete_form' );
+         break;
+
+      default:
+         return drupal_get_form( 'csv2cck_process_form' );
+         break;
+   }
+}
+
+function csv2cck_load_modules() {
+   foreach(
+      scandir( drupal_get_path( 'module', 'csv2cck' ).'/modules' ) as
+      $csv2cck_module
+   ) {
+      if( '.' == $csv2cck_module[0] ) {
+         continue;
+      }
+
+      require_once(
+         drupal_get_path( 'module', 'csv2cck' ).'/modules/'.$csv2cck_module
+      );
+   }
+}
+
+function csv2cck_invoke_form( $form, &$form_state, $column_id, $field_info ) {
+   csv2cck_load_modules();
+   if( function_exists( 
+      'csv2cck_field_options_'.$field_info['type'].'_form' )
+   ) {
+      // Gather the form elements from the hook.
+      $form['csv2cck_data'] = array(
+         'column_id' => $column_id,
+         'field_info' => $field_info,
+      );
+      $field_responses = call_user_func(
+         'csv2cck_field_options_'.$field_info['type'].'_form',
+         $form, $form_state
+      );
+
+      // Add the prefix and suffix to the mini-form parent element.
+      $field_responses['#prefix'] = '<div class="csvcolumn-options" '.
+         'id="csvcolumn-'.$column_id.'-options">';
+      $field_responses['#suffix'] = '</div>';
+
+      // Replace the ID and name so that the form submit function can grab 
+      // the contents of the elements. The system only cares about the name
+      // when it's grabbing an element!
+      foreach( $field_responses as $field_key => $field_value ) {
+         if( '#' == $field_key[0] ) {
+            // Is there a more elegant way of skipping system keys?
+            continue;
+         }
+         $field_responses[$field_key]['#name'] =
+            'csvrows['.$column_id.'][options]['.$field_key.']';
+         $field_responses[$field_key]['#id'] =
+            'csvcolumn-'.$column_id.'-options-'.$field_key;
+      }
+
+      return $field_responses;
+   }
+}
+
+function csv2cck_invoke_convert( $data, $field_info, $options ) {
+   csv2cck_load_modules();
+   if( function_exists( 
+      'csv2cck_field_options_'.$field_info['type'].'_convert' )
+   ) {
+      // Gather the form elements from the hook.
+      $field_responses = call_user_func(
+         'csv2cck_field_options_'.$field_info['type'].'_convert',
+         $data, $field_info, $options
+      );
+
+      return $field_responses;
+   }
+
+   // TODO: How do we handle no converter available?
+   return array( 
+      'safe_value' => check_plain( $data ),
+      'raw_value' => $data,
+      'valid' => true,
+   );
+}
+
+function csv2cck_invoke_attachment( $data_array, $field_info ) {
+   csv2cck_load_modules();
+   if( function_exists( 
+      'csv2cck_field_options_'.$field_info['type'].'_attachment' )
+   ) {
+      // Gather the form elements from the hook.
+      $attachment = call_user_func(
+         'csv2cck_field_options_'.$field_info['type'].'_attachment',
+         $data_array, $field_info
+      );
+
+      return $attachment;
+   } elseif( !empty( $data_array['raw_value'] ) ) {
+      // A basic default plain-text attachment.
+      return array(
+         'value' => $data_array['raw_value'],
+         // TODO: Should the safe value always use check_plain() and NULL fmt?
+         'safe_value' => check_plain( $data_array['raw_value'] ),
+         'format' => null,
+      );
+   } else {
+      return array();
+   }
+}
+
+function csv2cck_convert_row_node( $row, &$convert_map ) {
+   // Create the new node.
+   $node = new stdClass();
+   $node->type = $convert_map['node_type'];
+   node_object_prepare( $node );
+
+   // TODO: Implement localization.
+   $node->language = LANGUAGE_NONE;
+
+   for( $i = 0 ; $i < count( $row ) ; $i++ ) {
+      if( empty( $convert_map[$i]['field'] ) ) {
+         continue;
+      }
+
+      $property_tentative = csv2cck_invoke_attachment(
+         // TODO: If a CSV field is assigned to more than one property, add
+         //       additional iterations of that property as appropriate.
+         csv2cck_invoke_convert(
+            $row[$i],
+            field_info_field( $convert_map[$i]['field'] ),
+            (
+               array_key_exists( 'options', $convert_map[$i] ) ?
+               $convert_map[$i]['options'] :
+               array()
+            )
+         ),
+         field_info_field( $convert_map[$i]['field'] )
+      );
+
+      // Only create the attachment if there's something to attach.
+      if( !empty( $property_tentative ) ) {
+         $node->{$convert_map[$i]['field']}[$node->language][0] = (
+            !empty( $property_tentative ) ?
+            $property_tentative :
+            array()
+         );
+      }
+   }
+
+   return $node;
+}
+

@@ -1,0 +1,5 @@
+name = csv2cck
+description = "Utility to import spreadsheets or deliminated files into a list of nodes."
+core = 7.x
+files[] = csv2cck.module
+files[] = modules/node_reference.inc

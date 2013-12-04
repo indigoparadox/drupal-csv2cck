@@ -2,6 +2,8 @@
 // This line is so VIM recognizes this as a PHP file:
 // vim:ft=php:shiftwidth=3:tabstop=3:
 
+// TODO: Save per-site "conversion templates" for use later.
+
 // core: hook_menu()
 function csv2cck_menu() {
    $items['admin/structure/csv2cck'] = array(

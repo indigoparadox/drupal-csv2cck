@@ -620,6 +620,7 @@ function csv2cck_preview_form( $form, &$form_state ) {
          '#id' => 'csvnodes-'.$i.'-doconvert',
          '#type' => 'checkbox',
          '#default_value' => !$row_invalid,
+         '#disabled' => $row_invalid,
       );
 
       $form['csvnodes'][$i]['data']['doconvert'] = &$do_convert;

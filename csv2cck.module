@@ -580,17 +580,26 @@ function csv2cck_preview_form( $form, &$form_state ) {
             field_info_field( $csv_convert_map[$j]['field'] ),
             $csv_convert_map[$j]['options']
          );
-         $column_content = array(
-            '#id' => 'csvnode-'.$i.'-'.$j,
-            '#type' => 'item',
-            '#markup' => $convert_iter['safe_value'],
-         );
 
          //if( empty( $convert_iter['raw_value'] ) ) {
          if( false == $convert_iter['valid'] ) {
             //debug( $csv_convert_map[$j]['field'] );
             $row_invalid = true;
             $any_row_invalid = true;
+
+            // Put the raw data into the cell so we can see what is wrong.
+            $column_content = array(
+               '#id' => 'csvnode-'.$i.'-'.$j,
+               '#type' => 'item',
+               '#markup' => check_plain( $csv_data[$i][$j] ),
+            );
+         } else {
+            // Put the formatted data in place.
+            $column_content = array(
+               '#id' => 'csvnode-'.$i.'-'.$j,
+               '#type' => 'item',
+               '#markup' => $convert_iter['safe_value'],
+            );
          }
 
          $form['csvnodes'][$i]['data'][$j] = &$column_content;
@@ -611,6 +620,7 @@ function csv2cck_preview_form( $form, &$form_state ) {
          '#id' => 'csvnodes-'.$i.'-doconvert',
          '#type' => 'checkbox',
          '#default_value' => !$row_invalid,
+         '#disabled' => $row_invalid,
       );
 
       $form['csvnodes'][$i]['data']['doconvert'] = &$do_convert;
